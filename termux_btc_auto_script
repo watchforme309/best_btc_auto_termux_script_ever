@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+import os
+import subprocess
+import time
+import requests
+import signal
+from datetime import datetime
+
+BTC_ADDRESS = "32QLDQf4UNqCNJTKYBNXK2jzSnSctWfwc4"
+BASE_DIR = os.path.expanduser("~/btcminer")
+MINER_DIR = f"{BASE_DIR}/cpuminer-opt"
+MINER_BIN = f"{MINER_DIR}/cpuminer"
+LOG_FILE = f"{BASE_DIR}/miner.log"
+
+CHECK_INTERVAL = 300   # 5 minutes
+FAILSAFE_ROTATE = 900  # 15 minutes fallback
+
+POOLS = [
+    {
+        "name": "ZPOOL",
+        "algo": "sha256d",
+        "url": "stratum+tcp://sha256.mine.zpool.ca:3333",
+        "user": BTC_ADDRESS,
+        "pass": "c=BTC",
+        "profit_api": "https://zpool.ca/api/status"
+    },
+    {
+        "name": "ZERGPOOL",
+        "algo": "sha256d",
+        "url": "stratum+tcp://sha256.mine.zergpool.com:3333",
+        "user": BTC_ADDRESS,
+        "pass": "c=BTC",
+        "profit_api": "https://zergpool.com/api/status"
+    },
+    {
+        "name": "MININGDUTCH",
+        "algo": "sha256d",
+        "url": "stratum+tcp://sha256d.mining-dutch.nl:9999",
+        "user": BTC_ADDRESS,
+        "pass": "c=BTC",
+        "profit_api": None
+    }
+]
+
+current_proc = None
+current_pool = None
+
+# ─────────────────────────────────────────────
+
+def log(msg):
+    ts = datetime.utcnow().isoformat()
+    line = f"[{ts}] {msg}"
+    print(line)
+    os.makedirs(BASE_DIR, exist_ok=True)
+    with open(LOG_FILE, "a") as f:
+        f.write(line + "\n")
+
+def run(cmd):
+    log(f"RUN: {cmd}")
+    subprocess.run(cmd, shell=True, check=False)
+
+def install_deps():
+    run("pkg update -y")
+    run("pkg install -y python git clang make automake autoconf libtool")
+
+def build_miner():
+    if os.path.exists(MINER_BIN):
+        log("Miner already built")
+        return
+    os.makedirs(BASE_DIR, exist_ok=True)
+    os.chdir(BASE_DIR)
+    run("git clone https://github.com/JayDDee/cpuminer-opt.git")
+    os.chdir(MINER_DIR)
+    run("./build.sh")
+
+def get_profit(pool):
+    if not pool["profit_api"]:
+        return 0.0
+    try:
+        r = requests.get(pool["profit_api"], timeout=10).json()
+        return float(r.get("hashrate", 0))
+    except:
+        return 0.0
+
+def choose_best_pool():
+    scored = []
+    for p in POOLS:
+        profit = get_profit(p)
+        scored.append((profit, p))
+        log(f"{p['name']} profit score: {profit}")
+    scored.sort(reverse=True, key=lambda x: x[0])
+    return scored[0][1]
+
+def start_miner(pool):
+    global current_proc, current_pool
+    stop_miner()
+    log(f"STARTING MINER ON {pool['name']}")
+    current_pool = pool["name"]
+    current_proc = subprocess.Popen([
+        MINER_BIN,
+        "-a", pool["algo"],
+        "-o", pool["url"],
+        "-u", pool["user"],
+        "-p", pool["pass"],
+        "--cpu-priority", "5"
+    ])
+
+def stop_miner():
+    global current_proc
+    if current_proc and current_proc.poll() is None:
+        log("Stopping miner")
+        current_proc.terminate()
+        current_proc.wait()
+    current_proc = None
+
+def monitor():
+    last_switch = time.time()
+    while True:
+        # Crash recovery
+        if current_proc and current_proc.poll() is not None:
+            log("Miner crashed – restarting")
+            start_miner(choose_best_pool())
+
+        # Profit switching
+        best = choose_best_pool()
+        if best["name"] != current_pool:
+            log(f"Switching to better pool: {best['name']}")
+            start_miner(best)
+            last_switch = time.time()
+
+        # Fallback rotation
+        if time.time() - last_switch > FAILSAFE_ROTATE:
+            idx = [p["name"] for p in POOLS].index(current_pool)
+            next_pool = POOLS[(idx + 1) % len(POOLS)]
+            log("Failsafe rotation")
+            start_miner(next_pool)
+            last_switch = time.time()
+
+        time.sleep(CHECK_INTERVAL)
+
+def cleanup(sig, frame):
+    log("Shutting down")
+    stop_miner()
+    exit(0)
+
+# ─────────────────────────────────────────────
+
+def main():
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
+
+    install_deps()
+    build_miner()
+
+    best = choose_best_pool()
+    start_miner(best)
+    monitor()
+
+if __name__ == "__main__":
+    main()
