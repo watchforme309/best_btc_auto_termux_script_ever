@@ -1,0 +1,96 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+
+clear
+echo "==========================================="
+echo " Bitcoin CPU Lottery Miner (TERMUX)"
+echo " CKPOOL SOLO + Public Pool"
+echo "==========================================="
+echo
+
+# -------- Ask for BTC Address ----------
+read -rp "Enter your Bitcoin address: " BTC_ADDR
+
+if [[ ! "$BTC_ADDR" =~ ^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,39}$ ]]; then
+  echo "❌ Invalid BTC address"
+  exit 1
+fi
+
+WORKER="termux-$(uname -n)"
+THREADS=$(nproc)
+PREFIX=/data/data/com.termux/files/usr
+LOGDIR=$HOME/btc_lottery_logs
+
+mkdir -p "$LOGDIR"
+
+echo
+echo "Threads : $THREADS"
+echo "Worker  : $WORKER"
+echo "Logs    : $LOGDIR"
+sleep 2
+
+# -------- Update + install deps ----------
+echo "📦 Installing dependencies..."
+pkg update -y
+pkg upgrade -y
+pkg install -y \
+  git clang make automake autoconf \
+  libcurl openssl-dev jansson libgmp
+
+# -------- Build cpuminer ----------
+if [ ! -f "$PREFIX/bin/cpuminer" ]; then
+  echo "⚙️ Building cpuminer-multi..."
+  git clone https://github.com/tpruvot/cpuminer-multi.git
+  cd cpuminer-multi
+  ./build.sh
+  make
+  make install
+  cd ..
+fi
+
+echo "✅ cpuminer installed"
+sleep 1
+
+# -------- Pools ----------
+CKPOOL_3333="stratum+tcp://solo.ckpool.org:3333"
+CKPOOL_443="stratum+ssl://solo.ckpool.org:443"
+PUBLIC_POOL="stratum+tcp://public-pool.io:21496"
+
+# -------- Mining Loop ----------
+while true; do
+  echo "🎯 CKPOOL SOLO LOTTERY (3333)"
+  cpuminer \
+    -a sha256d \
+    -o $CKPOOL_3333 \
+    -u $BTC_ADDR.$WORKER \
+    -p x \
+    -t $THREADS \
+    --timeout=120 \
+    --retry-pause=5 \
+    | tee "$LOGDIR/ckpool.log" || true
+
+  echo "🔐 CKPOOL TLS FALLBACK (443)"
+  cpuminer \
+    -a sha256d \
+    -o $CKPOOL_443 \
+    -u $BTC_ADDR.$WORKER \
+    -p x \
+    -t $THREADS \
+    --timeout=120 \
+    --retry-pause=5 \
+    | tee "$LOGDIR/ckpool_tls.log" || true
+
+  echo "🌍 PUBLIC POOL MODE"
+  cpuminer \
+    -a sha256d \
+    -o $PUBLIC_POOL \
+    -u $BTC_ADDR.$WORKER \
+    -p x \
+    -t $THREADS \
+    --timeout=120 \
+    --retry-pause=5 \
+    | tee "$LOGDIR/public_pool.log" || true
+
+  echo "🔄 Restarting lottery cycle..."
+  sleep 10
+done
