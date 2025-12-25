@@ -1,0 +1,87 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+
+clear
+echo "======================================"
+echo " BTC MULTI-POOL SOLO MINER (ROBUST) "
+echo " Pools: CKPOOL SOLO + Public-Pool.io "
+echo " Algorithm: sha256d (Bitcoin only)"
+echo " Auto-reconnect / Infinite retry / CPU optimized"
+echo "======================================"
+echo
+
+read -p "Enter your BTC address: " BTC
+echo
+
+if [[ ! $BTC =~ ^[13bc][a-zA-Z0-9]{20,}$ ]]; then
+    echo "Invalid BTC address."
+    exit 1
+fi
+
+# Detect CPU cores
+CORES=$(nproc)
+THREADS_PER_POOL=$((CORES / 2))
+if [ $THREADS_PER_POOL -lt 1 ]; then
+  THREADS_PER_POOL=1
+fi
+
+# Install dependencies
+echo "[*] Updating Termux..."
+pkg update -y && pkg upgrade -y
+echo "[*] Installing dependencies..."
+pkg install -y git clang make automake autoconf libtool pkg-config \
+               openssl curl libjansson libgmp
+
+# Build cpuminer
+cd $HOME
+rm -rf cpuminer-multi
+git clone https://github.com/tpruvot/cpuminer-multi.git
+cd cpuminer-multi
+echo "[*] Building cpuminer-multi..."
+./autogen.sh
+CFLAGS="-O2" ./configure --with-crypto --with-curl
+make -j$(nproc)
+
+echo
+echo "======================================"
+echo " STARTING ROBUST MULTI-POOL BTC MINING "
+echo "======================================"
+echo
+
+start_miner() {
+  POOL_URL=$1
+  USER=$2
+  THREADS=$3
+  BACKOFF=5
+
+  while true; do
+    echo "[*] Connecting to $POOL_URL ..."
+    ./cpuminer \
+      -a sha256d \
+      -o $POOL_URL \
+      -u $USER \
+      -p x \
+      -t $THREADS \
+      --cpu-priority 5 \
+      --no-color
+    echo "[!] Miner disconnected from $POOL_URL. Retrying in $BACKOFF seconds..."
+    sleep $BACKOFF
+    # Exponential backoff up to 60s
+    BACKOFF=$((BACKOFF*2))
+    if [ $BACKOFF -gt 60 ]; then
+      BACKOFF=60
+    fi
+  done
+}
+
+# Run CKPOOL solo in background
+start_miner "stratum+tcp://solo.ckpool.org:4334" "$BTC.termux" $THREADS_PER_POOL &
+
+# Run Public-Pool.io in background
+start_miner "stratum+tcp://public-pool.io:21496" "$BTC.termux" $THREADS_PER_POOL &
+
+echo "[*] Mining started on both pools!"
+echo "[*] Check your CKPOOL stats here:"
+echo "https://solo.ckpool.org/users/$BTC"
+echo
+wait
