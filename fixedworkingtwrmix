@@ -1,0 +1,124 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+
+clear
+echo "=============================================="
+echo " Bitcoin Lottery Miner – TERMUX (WORKING)"
+echo " CKPOOL SOLO + Public Pool"
+echo "=============================================="
+echo
+
+# ---------- Ask for BTC address ----------
+read -rp "Enter your Bitcoin address: " BTC_ADDR
+
+if [[ ! "$BTC_ADDR" =~ ^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,39}$ ]]; then
+  echo "❌ Invalid BTC address"
+  exit 1
+fi
+
+# ---------- Basic setup ----------
+PREFIX="/data/data/com.termux/files/usr"
+WORKER="termux-$(uname -n)"
+THREADS=$(nproc)
+LOGDIR="$HOME/btc_lottery_logs"
+
+mkdir -p "$LOGDIR"
+
+echo
+echo "Worker  : $WORKER"
+echo "Threads : $THREADS"
+echo "Prefix  : $PREFIX"
+echo "Logs    : $LOGDIR"
+sleep 2
+
+# ---------- Install dependencies ----------
+echo "📦 Installing required Termux packages..."
+pkg update -y
+pkg upgrade -y
+pkg install -y \
+  git \
+  clang \
+  make \
+  automake \
+  autoconf \
+  libcurl \
+  openssl \
+  libjansson \
+  libgmp
+
+# ---------- Build cpuminer ----------
+if ! command -v cpuminer >/dev/null 2>&1; then
+  echo "⚙️ Building cpuminer-multi (Termux-safe)..."
+
+  rm -rf "$HOME/cpuminer-multi"
+  cd "$HOME"
+
+  git clone https://github.com/tpruvot/cpuminer-multi.git
+  cd cpuminer-multi
+
+  autoreconf -fi
+
+  # Correct flags for Termux + OpenSSL 3
+  export CFLAGS="-O3 -march=armv8-a"
+  export CXXFLAGS="$CFLAGS"
+  export LDFLAGS="-L$PREFIX/lib"
+  export LIBS="-lcrypto"
+
+  ./configure \
+    --prefix="$PREFIX" \
+    --with-curl \
+    --with-crypto
+
+  make -j"$THREADS"
+  make install
+
+  cd "$HOME"
+fi
+
+echo "✅ cpuminer installed successfully"
+sleep 1
+
+# ---------- Pools ----------
+CKPOOL_3333="stratum+tcp://solo.ckpool.org:3333"
+CKPOOL_443="stratum+ssl://solo.ckpool.org:443"
+PUBLIC_POOL="stratum+tcp://public-pool.io:21496"
+
+# ---------- Start mining automatically ----------
+echo
+echo "🚀 Starting lottery mining now..."
+sleep 2
+
+while true; do
+  echo "🎯 CKPOOL SOLO (3333)"
+  cpuminer -a sha256d \
+    -o "$CKPOOL_3333" \
+    -u "$BTC_ADDR.$WORKER" \
+    -p x \
+    -t "$THREADS" \
+    --retry-pause=5 \
+    --timeout=120 \
+    | tee "$LOGDIR/ckpool.log" || true
+
+  echo "🔐 CKPOOL TLS (443)"
+  cpuminer -a sha256d \
+    -o "$CKPOOL_443" \
+    -u "$BTC_ADDR.$WORKER" \
+    -p x \
+    -t "$THREADS" \
+    --retry-pause=5 \
+    --timeout=120 \
+    | tee "$LOGDIR/ckpool_tls.log" || true
+
+  echo "🌍 PUBLIC POOL"
+  cpuminer -a sha256d \
+    -o "$PUBLIC_POOL" \
+    -u "$BTC_ADDR.$WORKER" \
+    -p x \
+    -t "$THREADS" \
+    --retry-pause=5 \
+    --timeout=120 \
+    | tee "$LOGDIR/public_pool.log" || true
+
+  echo "🔄 Restarting cycle..."
+  sleep 10
+done
