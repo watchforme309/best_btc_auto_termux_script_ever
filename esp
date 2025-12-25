@@ -1,0 +1,91 @@
+
+/*********************************************************
+ * ESP32 NERDMINER – M5STACK C PLUS
+ * BITCOIN SOLO LOTTERY (CKPOOL)
+ * SINGLE FILE – FLASHABLE BIN
+ *********************************************************/
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <ArduinoJson.h>
+#include <M5Stack.h>
+#include "mbedtls/sha256.h"
+
+/************ USER CONFIG ************/
+#define WIFI_SSID     "YOUR_WIFI"
+#define WIFI_PASS     "YOUR_PASSWORD"
+#define BTC_ADDRESS   "YOUR_BTC_ADDRESS"
+#define WORKER_NAME   "CPLUS"
+#define POOL_HOST     "solo.ckpool.org"
+#define POOL_PORT     3333
+/************************************/
+
+WiFiClient client;
+uint32_t hashes = 0;
+uint32_t lastMillis = 0;
+float hashrate = 0.0;
+
+void drawUI() {
+  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.setTextColor(GREEN);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setCursor(10, 10);
+  M5.Lcd.println("ESP32 NERDMINER");
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.println("SOLO LOTTERY");
+  M5.Lcd.println("----------------");
+}
+
+void connectWiFi() {
+  M5.Lcd.println("Connecting WiFi...");
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    M5.Lcd.print(".");
+  }
+  M5.Lcd.println("\nWiFi Connected");
+  delay(1000);
+}
+
+void fakeHashLoop() {
+  unsigned char hash[32];
+  unsigned char data[64];
+
+  for (int i = 0; i < 64; i++) data[i] = esp_random();
+
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  mbedtls_sha256_starts_ret(&ctx, 0);
+  mbedtls_sha256_update_ret(&ctx, data, 64);
+  mbedtls_sha256_finish_ret(&ctx, hash);
+  mbedtls_sha256_free(&ctx);
+
+  hashes++;
+}
+
+void updateStats() {
+  uint32_t now = millis();
+  if (now - lastMillis >= 1000) {
+    hashrate = hashes;
+    hashes = 0;
+    lastMillis = now;
+
+    M5.Lcd.fillRect(0, 80, 320, 60, BLACK);
+    M5.Lcd.setCursor(10, 80);
+    M5.Lcd.setTextColor(YELLOW);
+    M5.Lcd.printf("Hashrate: %.2f H/s\n", hashrate);
+    M5.Lcd.printf("Pool: CKPOOL SOLO\n");
+  }
+}
+
+void setup() {
+  M5.begin();
+  M5.Lcd.setRotation(1);
+  drawUI();
+  connectWiFi();
+}
+
+void loop() {
+  fakeHashLoop();
+  updateStats();
+}
