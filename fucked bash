@@ -1,0 +1,81 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+
+clear
+echo "======================================"
+echo " BTC MULTI-POOL SOLO MINER (TERMUX) "
+echo " Pools: CKPOOL SOLO + Public-Pool.io "
+echo " Algorithm: sha256d (Bitcoin only)"
+echo " Robust, auto-reconnect, CPU optimized"
+echo "======================================"
+echo
+
+read -p "Enter your BTC address: " BTC
+echo
+
+if [[ ! $BTC =~ ^[13bc][a-zA-Z0-9]{20,}$ ]]; then
+    echo "Invalid BTC address."
+    exit 1
+fi
+
+# Detect CPU cores
+CORES=$(nproc)
+THREADS_PER_POOL=$((CORES / 2))
+if [ $THREADS_PER_POOL -lt 1 ]; then
+  THREADS_PER_POOL=1
+fi
+
+echo "[*] Updating Termux..."
+pkg update -y && pkg upgrade -y
+
+echo "[*] Installing dependencies..."
+pkg install -y git clang make automake autoconf libtool pkg-config \
+               openssl curl libjansson libgmp
+
+echo "[*] Cloning cpuminer-multi..."
+cd $HOME
+rm -rf cpuminer-multi
+git clone https://github.com/tpruvot/cpuminer-multi.git
+cd cpuminer-multi
+
+echo "[*] Building miner..."
+./autogen.sh
+CFLAGS="-O2" ./configure --with-crypto --with-curl
+make -j$(nproc)
+
+echo
+echo "======================================"
+echo " STARTING MULTI-POOL BTC MINING "
+echo "======================================"
+echo
+
+start_miner() {
+  POOL_URL=$1
+  USER=$2
+  THREADS=$3
+
+  while true; do
+    echo "[*] Connecting to $POOL_URL ..."
+    ./cpuminer \
+      -a sha256d \
+      -o $POOL_URL \
+      -u $USER \
+      -p x \
+      -t $THREADS \
+      --cpu-priority 5 \
+      --no-color || echo "[!] Miner crashed or connection lost, retrying in 10s..."
+    sleep 10
+  done
+}
+
+# Start CKPOOL solo
+start_miner "stratum+tcp://solo.ckpool.org:4334" "$BTC.termux" $THREADS_PER_POOL &
+
+# Start Public-Pool.io
+start_miner "stratum+tcp://public-pool.io:21496" "$BTC.termux" $THREADS_PER_POOL &
+
+echo "[*] Mining started on both pools!"
+echo "[*] Check your CKPOOL stats here:"
+echo "https://solo.ckpool.org/users/$BTC"
+echo
+wait
