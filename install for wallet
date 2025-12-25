@@ -1,0 +1,20 @@
+pkg update -y && pkg upgrade -y
+pkg install python clang make git pkg-config libffi-dev openssl-dev -y
+
+
+
+pip install --upgrade pip wheel setuptools
+
+
+
+# coincurve is usually the tricky one
+pip install --no-binary :all: coincurve
+
+pip install bip-utils cryptography ecdsa base58
+
+
+
+pip install bitcoinlib cryptography ecdsa
+
+pip install bitcoinlib cryptography ecdsa
+
