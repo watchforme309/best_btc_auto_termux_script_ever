@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+import sys, subprocess, os, json, getpass, hashlib
+from base64 import urlsafe_b64encode
+
+# ---------------- AUTO INSTALL ---------------- #
+
+REQUIRED = ["bitcoinlib", "cryptography"]
+
+def install_deps():
+    for pkg in REQUIRED:
+        try:
+            __import__(pkg)
+        except ImportError:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+
+install_deps()
+
+# ---------------- IMPORTS ---------------- #
+
+from cryptography.fernet import Fernet
+from bitcoinlib.wallets import Wallet
+from bitcoinlib.mnemonic import Mnemonic
+
+# ---------------- CONFIG ---------------- #
+
+WALLET_NAME = "secure_termux_btc"
+VAULT_FILE = "vault.enc"
+
+# ---------------- ENCRYPTION ---------------- #
+
+def derive_key(password: str) -> bytes:
+    return urlsafe_b64encode(hashlib.sha256(password.encode()).digest())
+
+def encrypt_vault(data: dict, password: str):
+    f = Fernet(derive_key(password))
+    with open(VAULT_FILE, "wb") as f_out:
+        f_out.write(f.encrypt(json.dumps(data).encode()))
+
+def decrypt_vault(password: str) -> dict:
+    f = Fernet(derive_key(password))
+    with open(VAULT_FILE, "rb") as f_in:
+        return json.loads(f.decrypt(f_in.read()).decode())
+
+# ---------------- WALLET ---------------- #
+
+def create_secure_wallet():
+    print("\n🔐 Creating SECURE Bitcoin MAINNET wallet\n")
+
+    mnemonic = Mnemonic().generate()
+    vault_pw = getpass.getpass("Vault password (AES): ")
+    wallet_pw = getpass.getpass("Wallet password: ")
+
+    encrypt_vault({"mnemonic": mnemonic}, vault_pw)
+
+    wallet = Wallet.create(
+        WALLET_NAME,
+        keys=mnemonic,
+        network="bitcoin",
+        password=wallet_pw,
+        witness_type="segwit"
+    )
+
+    print("\n✅ Wallet created with DOUBLE encryption")
+    print("⚠️ BACK UP THIS MNEMONIC (OFFLINE):\n")
+    print(mnemonic)
+
+    return wallet
+
+def load_secure_wallet():
+    vault_pw = getpass.getpass("Vault password (AES): ")
+    data = decrypt_vault(vault_pw)
+
+    wallet_pw = getpass.getpass("Wallet password: ")
+    return Wallet(WALLET_NAME, password=wallet_pw)
+
+# ---------------- FEATURES ---------------- #
+
+def show_addresses(wallet):
+    print("\n📬 BTC ADDRESSES:\n")
+    for key in wallet.get_keys(number=3):
+        print(key.address)
+
+def sign_message(wallet):
+    msg = input("Message to sign: ")
+    sig = wallet.sign_message(wallet.get_key().address, msg)
+    print("\nSignature:\n", sig)
+
+def verify_message(wallet):
+    addr = input("Address: ")
+    msg = input("Message: ")
+    sig = input("Signature: ")
+    print("\nValid:", wallet.verify_message(addr, sig, msg))
+
+# ---------------- MENU ---------------- #
+
+def main():
+    print("\n🔐 BTC WALLET — EXTRA ENCRYPTION ENABLED\n")
+
+    if not os.path.exists(VAULT_FILE):
+        wallet = create_secure_wallet()
+    else:
+        wallet = load_secure_wallet()
+
+    while True:
+        print("""
+1) Show BTC addresses
+2) Sign message
+3) Verify message
+4) Exit
+""")
+        c = input("> ").strip()
+
+        if c == "1":
+            show_addresses(wallet)
+        elif c == "2":
+            sign_message(wallet)
+        elif c == "3":
+            verify_message(wallet)
+        elif c == "4":
+            break
+
+if __name__ == "__main__":
+    main()
