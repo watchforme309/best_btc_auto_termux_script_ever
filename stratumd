@@ -1,0 +1,106 @@
+#!/data/data/com.termux/files/usr/bin/python3
+import socket
+import json
+import hashlib
+import struct
+import time
+import random
+import sys
+
+# ================= USER CONFIG =================
+POOL_HOST = "solo.ckpool.org"
+POOL_PORT = 3333
+BTC_ADDRESS = input("Enter your BTC address: ").strip()
+WORKER = "termux"
+# ===============================================
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect((POOL_HOST, POOL_PORT))
+sock_file = sock.makefile("rwb", buffering=0)
+
+def send(msg):
+    sock_file.write((json.dumps(msg) + "\n").encode())
+
+def recv():
+    return json.loads(sock_file.readline().decode())
+
+def sha256d(data):
+    return hashlib.sha256(hashlib.sha256(data).digest()).digest()
+
+# ---- Subscribe ----
+send({
+    "id": 1,
+    "method": "mining.subscribe",
+    "params": []
+})
+sub = recv()
+
+# ---- Authorize ----
+send({
+    "id": 2,
+    "method": "mining.authorize",
+    "params": [BTC_ADDRESS + "." + WORKER, "x"]
+})
+auth = recv()
+
+print("[+] Subscribed and authorized")
+
+extranonce1 = sub["result"][1]
+extranonce2_size = sub["result"][2]
+
+job = None
+
+def build_coinbase(cb1, cb2, extranonce2):
+    return bytes.fromhex(cb1 + extranonce1 + extranonce2 + cb2)
+
+def merkle_root(coinbase, branches):
+    h = sha256d(coinbase)
+    for b in branches:
+        h = sha256d(h + bytes.fromhex(b))
+    return h[::-1]
+
+while True:
+    msg = recv()
+
+    if msg.get("method") == "mining.notify":
+        job = msg["params"]
+        job_id, prevhash, cb1, cb2, merkle, version, nbits, ntime, _ = job
+        print("[*] New job", job_id)
+
+        extranonce2 = format(random.getrandbits(extranonce2_size * 8), f"0{extranonce2_size*2}x")
+        coinbase = build_coinbase(cb1, cb2, extranonce2)
+        mrkl = merkle_root(coinbase, merkle)
+
+        header = (
+            bytes.fromhex(version)[::-1] +
+            bytes.fromhex(prevhash)[::-1] +
+            mrkl +
+            bytes.fromhex(ntime)[::-1] +
+            bytes.fromhex(nbits)[::-1]
+        )
+
+        nonce = 0
+        while True:
+            nonce_bytes = struct.pack("<I", nonce)
+            block = header + nonce_bytes
+            h = sha256d(block)
+
+            if h[::-1].hex().startswith("000000"):
+                print("[+] Share found, submitting…")
+
+                send({
+                    "id": 4,
+                    "method": "mining.submit",
+                    "params": [
+                        BTC_ADDRESS + "." + WORKER,
+                        job_id,
+                        extranonce2,
+                        nonce_bytes.hex(),
+                        ntime
+                    ]
+                })
+                print(recv())
+
+            nonce += 1
+            if nonce % 100000 == 0:
+                print("Hashing… nonce", nonce)
