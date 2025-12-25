@@ -1,0 +1,184 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""
+Lightning-Friendly BTC Miner for Termux
+- Asks only for Lightning BTC address
+- Mines to internal on-chain BTC address
+- Automatically forwards to Lightning via LNBits
+- Plain TCP Stratum (no TLS)
+"""
+
+import socket, json, threading, time, random, hashlib, requests
+
+# ---------------- USER INPUT ----------------
+LIGHTNING_ADDRESS = input("Enter your Lightning BTC address: ").strip()
+WORKER = "termux_worker"
+THREADS_PER_POOL = 1
+CHECK_INTERVAL = 60  # seconds
+
+# Internal BTC address for pool payout (hidden from user)
+BTC_POOL_ADDRESS = "YOUR_INTERNAL_ONCHAIN_ADDRESS"
+
+# Example pools (replace with real ones if needed)
+POOLS = [
+    ("solo.ckpool.org", 3333),
+    ("public-pool.io", 21496)
+]
+
+hash_rates = {}
+lock = threading.Lock()
+seen_txs = set()
+
+# ---------- HASH UTIL ----------
+def sha256d(b):
+    return hashlib.sha256(hashlib.sha256(b).digest()).digest()
+
+# ---------- SHARE SUBMISSION ----------
+def submit_share(sock, pool, job_id, extranonce2, nonce, ntime):
+    msg = {
+        "id": 4,
+        "method": "mining.submit",
+        "params": [
+            f"{BTC_POOL_ADDRESS}.{WORKER}",
+            job_id,
+            extranonce2,
+            format(nonce, "08x"),
+            ntime
+        ]
+    }
+    try:
+        sock.sendall((json.dumps(msg) + "\n").encode())
+    except:
+        pass
+
+# ---------- HASH WORKER ----------
+def hash_worker(pool, sock, job):
+    job_id, prevhash, coinbase1, coinbase2, merkle, version, nbits, ntime, extranonce1, extranonce2_size = job
+    count = 0
+    start = time.time()
+    while True:
+        extranonce2 = format(random.getrandbits(extranonce2_size * 8), f"0{extranonce2_size*2}x")
+        coinbase = bytes.fromhex(coinbase1 + extranonce1 + extranonce2 + coinbase2)
+
+        merkle_root = sha256d(coinbase)
+        for m in merkle:
+            merkle_root = sha256d(merkle_root + bytes.fromhex(m))
+
+        header = (
+            bytes.fromhex(version)[::-1] +
+            bytes.fromhex(prevhash)[::-1] +
+            merkle_root[::-1] +
+            bytes.fromhex(ntime)[::-1] +
+            bytes.fromhex(nbits)[::-1]
+        )
+
+        for nonce in range(0, 0xffffffff):
+            block = header + nonce.to_bytes(4, "little")
+            h = sha256d(block)
+
+            count += 1
+            if time.time() - start >= 1:
+                with lock:
+                    hash_rates[pool] = count
+                count = 0
+                start = time.time()
+
+            if int.from_bytes(h[::-1], "big") < int(nbits, 16):
+                submit_share(sock, pool, job_id, extranonce2, nonce, ntime)
+
+# ---------- POOL THREAD ----------
+def pool_thread(host, port):
+    pool_name = f"{host}:{port}"
+    while True:
+        try:
+            sock = socket.create_connection((host, port), timeout=10)
+            f = sock.makefile("rwb", buffering=0)
+            print(f"[+] Connected {pool_name}")
+
+            # Subscribe
+            f.write(b'{"id":1,"method":"mining.subscribe","params":[]}\n')
+            sub = json.loads(f.readline().decode())
+            extranonce1 = sub["result"][1]
+            extranonce2_size = sub["result"][2]
+
+            # Authorize
+            auth = {
+                "id": 2,
+                "method": "mining.authorize",
+                "params": [f"{BTC_POOL_ADDRESS}.{WORKER}", "x"]
+            }
+            f.write((json.dumps(auth) + "\n").encode())
+            f.readline()
+            print(f"[+] Authorized {pool_name}")
+
+            while True:
+                msg = json.loads(f.readline().decode())
+                if msg.get("method") == "mining.notify":
+                    p = msg["params"]
+                    job = (
+                        p[0], p[1], p[2], p[3], p[4],
+                        p[5], p[6], p[7],
+                        extranonce1, extranonce2_size
+                    )
+
+                    for _ in range(THREADS_PER_POOL):
+                        t = threading.Thread(
+                            target=hash_worker,
+                            args=(pool_name, sock, job),
+                            daemon=True
+                        )
+                        t.start()
+
+        except Exception as e:
+            print(f"[!] {pool_name} error: {e}")
+            time.sleep(5)
+
+# ---------- BTC -> LIGHTNING AUTOMATED ----------
+def check_new_btc():
+    API_URL = f"https://blockstream.info/api/address/{BTC_POOL_ADDRESS}/txs"
+    try:
+        resp = requests.get(API_URL).json()
+        for tx in resp:
+            txid = tx['txid']
+            amount = tx['vout'][0]['value']  # satoshis
+            if txid not in seen_txs:
+                seen_txs.add(txid)
+                print(f"[+] New BTC received: {amount/1e8} BTC")
+                pay_lightning_auto(amount)
+    except:
+        pass
+
+def pay_lightning_auto(amount_sats):
+    data = {"out": True, "amount": amount_sats, "memo": "Auto payout", "wallet": LIGHTNING_ADDRESS}
+    try:
+        r = requests.post("https://lnbits.com/api/v1/payments", json=data)
+        if r.status_code in [200, 201]:
+            print(f"[+] Paid {amount_sats} sats automatically to Lightning wallet!")
+        else:
+            print("[!] Lightning auto-pay failed:", r.text)
+    except:
+        print("[!] Lightning auto-pay error")
+
+def proxy_thread():
+    while True:
+        check_new_btc()
+        time.sleep(CHECK_INTERVAL)
+
+# ---------- LIVE STATS ----------
+def stats_thread():
+    while True:
+        with lock:
+            line = " | ".join(f"{p}: {hash_rates.get(p,0)} H/s" for p in hash_rates)
+        print("\r" + line, end="", flush=True)
+        time.sleep(2)
+
+# ---------- MAIN ----------
+def main():
+    threading.Thread(target=stats_thread, daemon=True).start()
+    threading.Thread(target=proxy_thread, daemon=True).start()
+    for h, p in POOLS:
+        threading.Thread(target=pool_thread, args=(h, p), daemon=True).start()
+    while True:
+        time.sleep(10)
+
+if __name__ == "__main__":
+    main()
