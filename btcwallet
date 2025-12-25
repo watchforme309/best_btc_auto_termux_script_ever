@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+import sys
+import subprocess
+import os
+import json
+import getpass
+import hashlib
+
+# ---------------- AUTO INSTALL ---------------- #
+
+REQUIRED_PACKAGES = [
+    "bip-utils",
+    "cryptography",
+    "ecdsa",
+    "base58"
+]
+
+def install_deps():
+    for pkg in REQUIRED_PACKAGES:
+        try:
+            __import__(pkg.replace("-", "_"))
+        except ImportError:
+            print(f"[+] Installing {pkg} ...")
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install", pkg
+            ])
+
+install_deps()
+
+# ---------------- IMPORTS ---------------- #
+
+from bip_utils import (
+    Bip39MnemonicGenerator, Bip39SeedGenerator,
+    Bip44, Bip84, Bip86,
+    Bip44Coins, Bip84Coins, Bip86Coins
+)
+from cryptography.fernet import Fernet
+from base64 import urlsafe_b64encode
+from ecdsa import SigningKey, SECP256k1
+
+# ---------------- CONFIG ---------------- #
+
+WALLET_FILE = "btc_wallet.enc"
+
+# ---------------- SECURITY ---------------- #
+
+def derive_key(password: str) -> bytes:
+    return urlsafe_b64encode(hashlib.sha256(password.encode()).digest())
+
+def encrypt(data: dict, password: str):
+    f = Fernet(derive_key(password))
+    with open(WALLET_FILE, "wb") as f_out:
+        f_out.write(f.encrypt(json.dumps(data).encode()))
+
+def decrypt(password: str) -> dict:
+    f = Fernet(derive_key(password))
+    with open(WALLET_FILE, "rb") as f_in:
+        return json.loads(f.decrypt(f_in.read()).decode())
+
+# ---------------- WALLET ---------------- #
+
+def create_wallet():
+    mnemonic = Bip39MnemonicGenerator().FromWordsNumber(24)
+    seed = Bip39SeedGenerator(mnemonic).Generate()
+
+    wallet = {
+        "mnemonic": mnemonic,
+        "seed": seed.hex()
+    }
+
+    pw = getpass.getpass("Create wallet password: ")
+    encrypt(wallet, pw)
+
+    print("\n✅ Wallet created & encrypted")
+    print("⚠️ WRITE DOWN THIS MNEMONIC:\n")
+    print(mnemonic)
+
+def load_wallet():
+    pw = getpass.getpass("Wallet password: ")
+    return decrypt(pw)
+
+# ---------------- ADDRESSES ---------------- #
+
+def generate_addresses(seed_hex):
+    seed = bytes.fromhex(seed_hex)
+
+    legacy = Bip44.FromSeed(seed, Bip44Coins.BITCOIN)
+    segwit = Bip84.FromSeed(seed, Bip84Coins.BITCOIN)
+    taproot = Bip86.FromSeed(seed, Bip86Coins.BITCOIN)
+
+    return {
+        "Legacy (P2PKH)": legacy.Purpose().Coin().Account(0).Change(0).AddressIndex(0).PublicKey().ToAddress(),
+        "SegWit (P2WPKH)": segwit.Purpose().Coin().Account(0).Change(0).AddressIndex(0).PublicKey().ToAddress(),
+        "Taproot (P2TR)": taproot.Purpose().Coin().Account(0).Change(0).AddressIndex(0).PublicKey().ToAddress()
+    }
+
+# ---------------- SIGN / VERIFY ---------------- #
+
+def sign_message(seed_hex, message):
+    sk = SigningKey.from_string(
+        hashlib.sha256(seed_hex.encode()).digest(),
+        curve=SECP256k1
+    )
+    return sk.sign(message.encode()).hex()
+
+def verify_message(seed_hex, message, signature_hex):
+    vk = SigningKey.from_string(
+        hashlib.sha256(seed_hex.encode()).digest(),
+        curve=SECP256k1
+    ).verifying_key
+    return vk.verify(bytes.fromhex(signature_hex), message.encode())
+
+# ---------------- MENU ---------------- #
+
+def main():
+    print("\n🔐 BTC MAINNET WALLET (AUTO INSTALL)\n")
+
+    if not os.path.exists(WALLET_FILE):
+        create_wallet()
+
+    wallet = load_wallet()
+
+    while True:
+        print("""
+1) Show BTC addresses
+2) Sign message
+3) Verify message
+4) Exit
+""")
+        c = input("> ").strip()
+
+        if c == "1":
+            addrs = generate_addresses(wallet["seed"])
+            for k, v in addrs.items():
+                print(f"{k}: {v}")
+
+        elif c == "2":
+            msg = input("Message to sign: ")
+            sig = sign_message(wallet["seed"], msg)
+            print("Signature:\n", sig)
+
+        elif c == "3":
+            msg = input("Message: ")
+            sig = input("Signature hex: ")
+            try:
+                print("Valid:", verify_message(wallet["seed"], msg, sig))
+            except Exception:
+                print("❌ Invalid signature")
+
+        elif c == "4":
+            break
+
+if __name__ == "__main__":
+    main()
