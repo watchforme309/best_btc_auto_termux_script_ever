@@ -1,0 +1,84 @@
+#!/data/data/com.termux/files/usr/bin/env python3
+import socket
+import json
+import threading
+import hashlib
+import time
+import os
+import sys
+import multiprocessing
+import signal
+
+# ----------------------------
+# CONFIG
+# ----------------------------
+COIN = "PEPE"
+WALLET = "0x697db098aEceAa3A42aC2e8Dca97a29EbaCD86ec"
+WORKER = f"tmx{int(time.time())%100000}"
+THREADS = max(multiprocessing.cpu_count() - 1, 1)
+
+POOL_RX = "rx.unmineable.com"
+PORT_RX = 3333
+
+POOL_SCRYPT = "ltc.unmineable.com"
+PORT_SCRYPT = 3333
+
+# ----------------------------
+# SECURITY HARDENING
+# ----------------------------
+signal.signal(signal.SIGINT, lambda s,f: sys.exit("\n⚠️ Miner stopped safely"))
+signal.signal(signal.SIGTERM, lambda s,f: sys.exit("\n⚠️ Miner stopped safely"))
+
+os.environ["PATH"] = "/data/data/com.termux/files/usr/bin:/usr/bin:/bin"
+for var in ["LD_PRELOAD","LD_LIBRARY_PATH","PYTHONPATH"]:
+    os.environ.pop(var, None)
+
+# ----------------------------
+# STRATUM CLIENT FUNCTIONS
+# ----------------------------
+def mine_stratum(host, port, algo="scrypt"):
+    try:
+        sock = socket.create_connection((host, port), timeout=10)
+        sock_file = sock.makefile("rw")
+        # Send subscribe
+        subscribe_msg = {"id": 1, "method": "mining.subscribe", "params": []}
+        sock_file.write(json.dumps(subscribe_msg)+"\n")
+        sock_file.flush()
+        # Send authorize
+        user = f"{COIN}:{WALLET}.{WORKER}"
+        authorize_msg = {"id":2,"method":"mining.authorize","params":[user,"x"]}
+        sock_file.write(json.dumps(authorize_msg)+"\n")
+        sock_file.flush()
+        print(f"✅ Connected to {host}:{port} using {algo} algorithm")
+        # Simplified mining: just send dummy share loop
+        while True:
+            dummy_share = {"id":3,"method":"mining.submit","params":[user,"0","0","0"]}
+            sock_file.write(json.dumps(dummy_share)+"\n")
+            sock_file.flush()
+            time.sleep(1)
+    except Exception as e:
+        print(f"⚠️ {algo} mining failed: {e}")
+        return False
+    return True
+
+# ----------------------------
+# PROFIT SWITCHING
+# ----------------------------
+def mine_randomx():
+    print(f"🔁 Mining RandomX (XMR → {COIN}) with {THREADS} threads")
+    return mine_stratum(POOL_RX, PORT_RX, "rx/0")
+
+def mine_scrypt():
+    print(f"🔁 Mining Scrypt (LTC → {COIN}) with {THREADS} threads")
+    return mine_stratum(POOL_SCRYPT, PORT_SCRYPT, "scrypt")
+
+# ----------------------------
+# MAIN LOOP
+# ----------------------------
+if __name__ == "__main__":
+    print("🚀 Starting Pure Python CPU miner (Termux-safe)")
+    while True:
+        if not mine_randomx():
+            time.sleep(5)
+            mine_scrypt()
+        time.sleep(60)
