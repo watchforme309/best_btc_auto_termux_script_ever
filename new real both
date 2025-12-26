@@ -1,0 +1,103 @@
+#!/data/data/com.termux/files/usr/bin/python3
+import socket, json, struct, hashlib, random, time
+
+POOL_HOST = "public-pool.io"
+POOL_PORT = 21496
+BTC_ADDRESS = "32QLDQf4UNqCNJTKYBNXK2jzSnSctWfwc4"
+WORKER = "michaelneedham"
+
+def sha256d(b):
+    return hashlib.sha256(hashlib.sha256(b).digest()).digest()
+
+def nbits_to_target(nbits_hex):
+    nbits = int(nbits_hex, 16)
+    exp = nbits >> 24
+    mant = nbits & 0xffffff
+    return mant * (1 << (8 * (exp - 3)))
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect((POOL_HOST, POOL_PORT))
+f = sock.makefile("rwb", buffering=0)
+
+def send(o):
+    f.write((json.dumps(o) + "\n").encode())
+
+def recv():
+    return json.loads(f.readline().decode())
+
+# ---- Subscribe ----
+send({"id":1,"method":"mining.subscribe","params":[]})
+sub = recv()
+extranonce1 = sub["result"][1]
+extranonce2_size = sub["result"][2]
+
+# ---- Authorize ----
+send({"id":2,"method":"mining.authorize",
+      "params":[f"{BTC_ADDRESS}.{WORKER}","x"]})
+recv()
+
+print("[+] Connected & authorized")
+
+def build_coinbase(cb1, cb2, en2):
+    return bytes.fromhex(cb1 + extranonce1 + en2 + cb2)
+
+def merkle_root(cb, branches):
+    h = sha256d(cb)
+    for b in branches:
+        h = sha256d(h + bytes.fromhex(b))
+    return h[::-1]
+
+while True:
+    msg = recv()
+    if msg.get("method") != "mining.notify":
+        continue
+
+    job_id, prevhash, cb1, cb2, branches, version, nbits, ntime, _ = msg["params"]
+    target = nbits_to_target(nbits)
+
+    print("[*] New job", job_id, "target", hex(target))
+
+    extranonce2 = 0
+    while True:
+        en2 = extranonce2.to_bytes(extranonce2_size, "little").hex()
+        coinbase = build_coinbase(cb1, cb2, en2)
+        mrkl = merkle_root(coinbase, branches)
+
+        header_base = (
+            bytes.fromhex(version)[::-1] +
+            bytes.fromhex(prevhash)[::-1] +
+            mrkl +
+            bytes.fromhex(ntime)[::-1] +
+            bytes.fromhex(nbits)[::-1]
+        )
+
+        for nonce in range(0xffffffff):
+            header = header_base + struct.pack("<I", nonce)
+            h = sha256d(header)
+            h_int = int.from_bytes(h[::-1], "big")
+
+            if h_int < target:
+                print("💥 VALID SHARE FOUND")
+                send({
+                    "id":4,
+                    "method":"mining.submit",
+                    "params":[
+                        f"{BTC_ADDRESS}.{WORKER}",
+                        job_id,
+                        en2,
+                        ntime,
+                        struct.pack("<I",nonce).hex()
+                    ]
+                })
+                print(recv())
+
+                # 🎯 BLOCK FOUND (LOTTERY WIN)
+                if h_int < 0x00000000FFFF0000000000000000000000000000000000000000000000000000:
+                    print("🏆🏆🏆 BLOCK CANDIDATE FOUND 🏆🏆🏆")
+
+                break
+
+            if nonce % 200000 == 0:
+                print("Hashing… nonce", nonce)
+
+        extranonce2 += 1
