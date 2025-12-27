@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+import os, csv, hashlib, subprocess, platform, stat
+from datetime import datetime
+
+# ================= CASE SETUP =================
+CASE_ID = f"CASE_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+BASE_CANDIDATES = [
+    os.path.expanduser("~/storage/downloads"),
+    os.path.expanduser("~/Downloads"),
+    os.path.expanduser("~")
+]
+BASE_OUT = next((p for p in BASE_CANDIDATES if os.path.exists(p)), None)
+if not BASE_OUT:
+    raise SystemExit("❌ No shared storage available")
+
+CASE_DIR = os.path.join(BASE_OUT, CASE_ID)
+TXT_DIR = os.path.join(CASE_DIR, "evidence_txt")
+META_DIR = os.path.join(CASE_DIR, "metadata")
+
+os.makedirs(TXT_DIR, exist_ok=True)
+os.makedirs(META_DIR, exist_ok=True)
+
+CSV_INDEX = os.path.join(CASE_DIR, "evidence_index.csv")
+CHAIN_FILE = os.path.join(CASE_DIR, "chain_of_custody.txt")
+
+# ================= HELPERS =================
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(8192), b""):
+            h.update(b)
+    return h.hexdigest()
+
+def save_txt(name, content):
+    safe = name.replace("/", "_").replace(" ", "_")
+    path = os.path.join(TXT_DIR, f"{safe}.txt")
+    with open(path, "w", encoding="utf-8", errors="ignore") as f:
+        f.write(content)
+    return path
+
+def chain(action):
+    with open(CHAIN_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.utcnow().isoformat()} UTC - {action}\n")
+
+def index_artifact(name, path, desc):
+    with open(CSV_INDEX, "a", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow([
+            name,
+            path,
+            sha256(path),
+            datetime.utcnow().isoformat(),
+            desc
+        ])
+
+# ================= INIT FILES =================
+with open(CSV_INDEX, "w", newline="") as csvfile:
+    csv.writer(csvfile).writerow([
+        "artifact_name", "file_path", "sha256", "collected_utc", "description"
+    ])
+
+chain("Case initialized")
+
+# ================= SYSTEM INFO =================
+sysinfo = f"""
+Hostname: {platform.node()}
+Platform: {platform.platform()}
+Python: {platform.python_version()}
+UTC Time: {datetime.utcnow().isoformat()}
+"""
+p = save_txt("system_info", sysinfo)
+index_artifact("system_info", p, "System identification")
+chain("Collected system info")
+
+# ================= USER ACCOUNTS =================
+users = "Unavailable"
+try:
+    with open("/etc/passwd", "r") as f:
+        users = f.read()
+except:
+    pass
+
+p = save_txt("user_accounts", users)
+index_artifact("user_accounts", p, "Local user accounts")
+chain("Collected user accounts")
+
+# ================= ANDROID LOGCAT =================
+try:
+    logcat = subprocess.check_output(
+        ["logcat", "-d", "-v", "threadtime"],
+        stderr=subprocess.DEVNULL
+    ).decode(errors="ignore")
+except Exception as e:
+    logcat = f"ERROR capturing logcat: {e}"
+
+p = save_txt("android_logcat", logcat)
+index_artifact("android_logcat", p, "Android logcat forensic snapshot")
+chain("Captured Android logcat")
+
+# ================= LOG FILES =================
+LOG_DIRS = [
+    "/var/log",
+    "/data/data/com.termux/files/usr/var/log"
+]
+
+for base in LOG_DIRS:
+    if not os.path.exists(base):
+        continue
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if "log" not in fn.lower():
+                continue
+            path = os.path.join(root, fn)
+            try:
+                with open(path, "r", errors="ignore") as f:
+                    content = f.read()
+                name = f"log_{path}"
+                p = save_txt(name, content)
+                index_artifact(path, p, "System/application log")
+            except:
+                pass
+
+chain("Collected log files")
+
+# ================= PERSISTENCE ARTIFACTS =================
+PERSISTENCE = [
+    "~/.bashrc",
+    "~/.profile",
+    "~/.bash_profile",
+    "~/.config",
+    "/etc/crontab"
+]
+
+for item in PERSISTENCE:
+    path = os.path.expanduser(item)
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", errors="ignore") as f:
+                content = f.read()
+            p = save_txt(item, content)
+            index_artifact(item, p, "Startup / persistence artifact")
+        except:
+            pass
+
+chain("Collected persistence artifacts")
+
+# ================= NETWORK ARTIFACTS =================
+NET = [
+    "~/.ssh/authorized_keys",
+    "~/.wget-hsts",
+    "~/.curlrc"
+]
+
+for item in NET:
+    path = os.path.expanduser(item)
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", errors="ignore") as f:
+                content = f.read()
+            p = save_txt(item, content)
+            index_artifact(item, p, "Network / remote access artifact")
+        except:
+            pass
+
+chain("Collected network artifacts")
+
+# ================= FILE METADATA SNAPSHOT =================
+meta_lines = []
+for base in LOG_DIRS:
+    if not os.path.exists(base):
+        continue
+    for root, _, files in os.walk(base):
+        for fn in files:
+            path = os.path.join(root, fn)
+            try:
+                st = os.stat(path)
+                meta_lines.append(
+                    f"{path} | size={st.st_size} | "
+                    f"perms={stat.filemode(st.st_mode)} | "
+                    f"mtime={datetime.fromtimestamp(st.st_mtime)} | "
+                    f"ctime={datetime.fromtimestamp(st.st_ctime)}"
+                )
+            except:
+                pass
+
+p = save_txt("file_metadata_snapshot", "\n".join(meta_lines))
+index_artifact("file_metadata_snapshot", p, "Filesystem metadata snapshot")
+chain("Captured filesystem metadata")
+
+# ================= README =================
+readme = f"""
+SUPER FORENSIC EVIDENCE COLLECTION
+
+Case ID: {CASE_ID}
+Generated (UTC): {datetime.utcnow().isoformat()}
+
+Artifacts:
+- All evidence stored as individual .txt files
+- SHA-256 hash per artifact
+- CSV evidence index included
+- Chain-of-custody recorded
+
+Collection method:
+- Read-only
+- Non-destructive
+- Repeatable
+"""
+p = save_txt("README", readme)
+index_artifact("README", p, "Case overview")
+chain("Case finalized")
+
+print("✅ SUPER FORENSIC COLLECTION COMPLETE")
+print(f"📁 Case directory:\n{CASE_DIR}")
