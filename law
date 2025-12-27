@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+import os, stat, hashlib, json, platform, subprocess
+from datetime import datetime
+
+# ================= CASE SETUP =================
+CASE_ID = f"CASE_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+BASE_OUT = os.path.expanduser("~/storage/downloads")
+if not os.path.exists(BASE_OUT):
+    BASE_OUT = os.path.expanduser("~/Downloads")
+if not os.path.exists(BASE_OUT):
+    BASE_OUT = os.path.expanduser("~")
+
+CASE_DIR = os.path.join(BASE_OUT, CASE_ID)
+EVID_DIR = os.path.join(CASE_DIR, "evidence")
+META_DIR = os.path.join(CASE_DIR, "metadata")
+
+os.makedirs(EVID_DIR, exist_ok=True)
+os.makedirs(META_DIR, exist_ok=True)
+
+MANIFEST = []
+CHAIN = []
+
+# ================= HELPERS =================
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(8192), b""):
+            h.update(b)
+    return h.hexdigest()
+
+def record_chain(action):
+    CHAIN.append({
+        "time_utc": datetime.utcnow().isoformat(),
+        "action": action
+    })
+
+def copy_readonly(src):
+    if not os.path.isfile(src):
+        return
+    dst = os.path.join(EVID_DIR, src.replace("/", "_"))
+    try:
+        with open(src, "rb") as s, open(dst, "wb") as d:
+            d.write(s.read())
+        MANIFEST.append({
+            "source": src,
+            "destination": dst,
+            "sha256": sha256(dst)
+        })
+        record_chain(f"Collected file: {src}")
+    except:
+        pass
+
+# ================= SYSTEM IDENTIFICATION =================
+record_chain("Case initialized")
+
+sysinfo = {
+    "hostname": platform.node(),
+    "platform": platform.platform(),
+    "python": platform.python_version(),
+    "utc_time": datetime.utcnow().isoformat()
+}
+
+with open(os.path.join(META_DIR, "system_info.json"), "w") as f:
+    json.dump(sysinfo, f, indent=2)
+
+# ================= USER ACCOUNTS =================
+users = []
+try:
+    with open("/etc/passwd", "r") as f:
+        for line in f:
+            users.append(line.strip())
+except:
+    pass
+
+with open(os.path.join(META_DIR, "users.txt"), "w") as f:
+    f.write("\n".join(users))
+
+record_chain("Enumerated user accounts")
+
+# ================= LOG COLLECTION =================
+LOG_PATHS = [
+    "/var/log/syslog",
+    "/var/log/auth.log",
+    "/var/log/messages",
+    "/data/data/com.termux/files/usr/var/log"
+]
+
+for p in LOG_PATHS:
+    if os.path.isfile(p):
+        copy_readonly(p)
+    elif os.path.isdir(p):
+        for root, _, files in os.walk(p):
+            for f in files:
+                if "log" in f.lower():
+                    copy_readonly(os.path.join(root, f))
+
+# ================= PERSISTENCE =================
+PERSISTENCE = [
+    "~/.bashrc",
+    "~/.profile",
+    "~/.bash_profile",
+    "~/.config",
+    "/etc/crontab"
+]
+
+for p in PERSISTENCE:
+    path = os.path.expanduser(p)
+    if os.path.isfile(path):
+        copy_readonly(path)
+
+record_chain("Collected persistence artifacts")
+
+# ================= NETWORK ARTIFACTS =================
+NET = [
+    "~/.ssh/authorized_keys",
+    "~/.wget-hsts",
+    "~/.curlrc"
+]
+
+for p in NET:
+    path = os.path.expanduser(p)
+    if os.path.isfile(path):
+        copy_readonly(path)
+
+record_chain("Collected network artifacts")
+
+# ================= MANIFEST =================
+with open(os.path.join(CASE_DIR, "manifest.json"), "w") as f:
+    json.dump(MANIFEST, f, indent=2)
+
+# ================= CHAIN OF CUSTODY =================
+with open(os.path.join(CASE_DIR, "chain_of_custody.json"), "w") as f:
+    json.dump(CHAIN, f, indent=2)
+
+# ================= FINAL REPORT =================
+with open(os.path.join(CASE_DIR, "README.txt"), "w") as f:
+    f.write(
+        "FORENSIC EVIDENCE COLLECTION\n\n"
+        f"Case ID: {CASE_ID}\n"
+        f"Generated UTC: {datetime.utcnow().isoformat()}\n\n"
+        "This evidence was collected in a read-only manner.\n"
+        "SHA-256 hashes are provided for integrity verification.\n"
+    )
+
+print("✅ Forensic evidence collection complete")
+print(f"📁 Case directory:\n{CASE_DIR}")
