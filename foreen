@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+import os, csv, hashlib, subprocess, platform
+from datetime import datetime
+
+# ================= CASE SETUP =================
+CASE_ID = f"CASE_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+
+BASE_DIRS = [
+    os.path.expanduser("~/storage/downloads"),
+    os.path.expanduser("~/Downloads"),
+    os.path.expanduser("~")
+]
+BASE_OUT = next((p for p in BASE_DIRS if os.path.exists(p)), None)
+if not BASE_OUT:
+    raise SystemExit("❌ No shared storage available")
+
+CASE_DIR = os.path.join(BASE_OUT, CASE_ID)
+EVID_DIR = os.path.join(CASE_DIR, "evidence_txt")
+
+os.makedirs(EVID_DIR, exist_ok=True)
+
+CSV_INDEX = os.path.join(CASE_DIR, "evidence_index.csv")
+
+# ================= HELPERS =================
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(8192), b""):
+            h.update(b)
+    return h.hexdigest()
+
+def save_txt(name, content):
+    path = os.path.join(EVID_DIR, f"{name}.txt")
+    with open(path, "w", encoding="utf-8", errors="ignore") as f:
+        f.write(content)
+    return path
+
+# ================= CSV INDEX =================
+with open(CSV_INDEX, "w", newline="") as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerow([
+        "artifact_name",
+        "file_path",
+        "sha256",
+        "collected_utc",
+        "description"
+    ])
+
+def index_artifact(name, path, desc):
+    with open(CSV_INDEX, "a", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow([
+            name,
+            path,
+            sha256(path),
+            datetime.utcnow().isoformat(),
+            desc
+        ])
+
+# ================= SYSTEM INFO =================
+sysinfo = f"""
+Hostname: {platform.node()}
+Platform: {platform.platform()}
+Python: {platform.python_version()}
+UTC Time: {datetime.utcnow().isoformat()}
+"""
+
+p = save_txt("system_info", sysinfo)
+index_artifact("system_info", p, "Basic system identification")
+
+# ================= ANDROID LOGCAT CAPTURE =================
+try:
+    logcat = subprocess.check_output(
+        ["logcat", "-d", "-v", "threadtime"],
+        stderr=subprocess.DEVNULL
+    ).decode(errors="ignore")
+except Exception:
+    logcat = "ERROR: logcat unavailable or permission denied"
+
+p = save_txt("android_logcat", logcat)
+index_artifact("android_logcat", p, "Android logcat forensic snapshot")
+
+# ================= USER ACCOUNTS =================
+passwd = ""
+try:
+    with open("/etc/passwd", "r") as f:
+        passwd = f.read()
+except:
+    passwd = "Unavailable"
+
+p = save_txt("user_accounts", passwd)
+index_artifact("user_accounts", p, "Local user account listing")
+
+# ================= PERSISTENCE FILES =================
+PERSISTENCE = [
+    "~/.bashrc",
+    "~/.profile",
+    "~/.bash_profile",
+    "/etc/crontab"
+]
+
+for item in PERSISTENCE:
+    path = os.path.expanduser(item)
+    if os.path.isfile(path):
+        with open(path, "r", errors="ignore") as f:
+            content = f.read()
+        p = save_txt(item.replace("/", "_"), content)
+        index_artifact(
+            item,
+            p,
+            "Startup / persistence configuration"
+        )
+
+# ================= NETWORK ARTIFACTS =================
+NET = [
+    "~/.ssh/authorized_keys",
+    "~/.wget-hsts",
+    "~/.curlrc"
+]
+
+for item in NET:
+    path = os.path.expanduser(item)
+    if os.path.isfile(path):
+        with open(path, "r", errors="ignore") as f:
+            content = f.read()
+        p = save_txt(item.replace("/", "_"), content)
+        index_artifact(
+            item,
+            p,
+            "Network / remote access artifact"
+        )
+
+# ================= FINAL README =================
+readme = f"""
+FORENSIC EVIDENCE COLLECTION (ANDROID)
+
+Case ID: {CASE_ID}
+Generated (UTC): {datetime.utcnow().isoformat()}
+
+All artifacts are stored as individual TXT files.
+Integrity verified via SHA-256 hashes.
+Evidence index provided in CSV format.
+
+Collection method:
+- Read-only
+- Non-destructive
+- Repeatable
+"""
+
+p = save_txt("README", readme)
+index_artifact("README", p, "Case overview and forensic notes")
+
+print("✅ Android forensic capture complete")
+print(f"📁 Case directory:\n{CASE_DIR}")
