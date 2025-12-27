@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+import os
+
+PERSISTENCE_LOCATIONS = [
+    "~/.bashrc",
+    "~/.profile",
+    "~/.bash_profile",
+    "/etc/crontab",
+    "~/.cron",
+    "~/.config"
+]
+
+print("\n🧠 Persistence indicators:\n")
+
+for p in PERSISTENCE_LOCATIONS:
+    path = os.path.expanduser(p)
+    if not os.path.exists(path):
+        continue
+
+    if os.path.isfile(path):
+        print(f"⚠️ Check file: {path}")
+    else:
+        for root, _, files in os.walk(path):
+            for f in files:
+                if f.startswith(".") or "run" in f.lower():
+                    print(f"⚠️ {os.path.join(root, f)}")
