@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+import os,csv,hashlib,subprocess,platform,stat
+from datetime import datetime
+
+CID="CASE_"+datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+BASE=next(p for p in[
+    os.path.expanduser("~/storage/downloads"),
+    os.path.expanduser("~/Downloads"),
+    os.path.expanduser("~")] if os.path.exists(p))
+
+ROOT=os.path.join(BASE,CID)
+EV=os.path.join(ROOT,"evidence")
+os.makedirs(EV,exist_ok=True)
+
+CSVF=os.path.join(ROOT,"index.csv")
+CHAIN=os.path.join(ROOT,"chain.txt")
+
+def h(p):
+    x=hashlib.sha256()
+    with open(p,"rb") as f:
+        for b in iter(lambda:f.read(8192),b""): x.update(b)
+    return x.hexdigest()
+
+def w(n,d):
+    n=n.replace("/","_")
+    p=os.path.join(EV,n+".txt")
+    open(p,"w",errors="ignore").write(d)
+    return p
+
+def idx(n,p,d):
+    csv.writer(open(CSVF,"a",newline="")).writerow(
+        [n,p,h(p),datetime.utcnow().isoformat(),d])
+
+def c(s):
+    open(CHAIN,"a").write(
+        f"{datetime.utcnow().isoformat()} UTC {s}\n")
+
+csv.writer(open(CSVF,"w",newline="")).writerow(
+    ["name","path","sha256","utc","desc"])
+c("init")
+
+p=w("system",
+    f"{platform.node()}\n{platform.platform()}\n{platform.python_version()}")
+idx("system",p,"system info")
+
+try:
+    p=w("users",open("/etc/passwd").read())
+    idx("users",p,"accounts")
+except: pass
+
+try:
+    p=w("logcat",subprocess.check_output(
+        ["logcat","-d","-v","threadtime"],
+        stderr=subprocess.DEVNULL).decode(errors="ignore"))
+    idx("logcat",p,"android logs")
+except: pass
+
+for d in ["/var/log","/data/data/com.termux/files/usr/var/log"]:
+    if not os.path.exists(d): continue
+    for r,_,f in os.walk(d):
+        for n in f:
+            if "log" in n.lower():
+                try:
+                    pth=os.path.join(r,n)
+                    p=w(pth,open(pth,errors="ignore").read())
+                    idx(pth,p,"log file")
+                except: pass
+
+meta=[]
+for d in ["/var/log"]:
+    if not os.path.exists(d): continue
+    for r,_,f in os.walk(d):
+        for n in f:
+            try:
+                s=os.stat(os.path.join(r,n))
+                meta.append(
+                    f"{r}/{n}|{s.st_size}|{stat.filemode(s.st_mode)}|"
+                    f"{datetime.fromtimestamp(s.st_mtime)}")
+            except: pass
+
+p=w("metadata","\n".join(meta))
+idx("metadata",p,"file metadata")
+
+c("done")
+print("OK:",ROOT)
