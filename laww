@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+import os
+import re
+import stat
+from datetime import datetime, timedelta
+
+# ================= SHARED STORAGE OUTPUT =================
+OUTPUT_DIRS = [
+    os.path.expanduser("~/storage/downloads"),
+    os.path.expanduser("~/Downloads"),
+    os.path.expanduser("~")
+]
+
+OUTPUT_DIR = next((d for d in OUTPUT_DIRS if os.path.exists(d)), None)
+if not OUTPUT_DIR:
+    raise SystemExit("❌ No shared storage available")
+
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "forensic_report.txt")
+
+# ================= TARGET LOCATIONS =================
+LOG_DIRS = [
+    "/var/log",
+    "/data/data/com.termux/files/usr/var/log",
+    os.path.expanduser("~")
+]
+
+PERSISTENCE_LOCATIONS = [
+    "~/.bashrc",
+    "~/.profile",
+    "~/.bash_profile",
+    "~/.config",
+    "~/.cron",
+    "/etc/crontab"
+]
+
+TIMESTAMP_REGEX = re.compile(
+    r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
+)
+
+timeline = []
+now = datetime.now()
+
+# ================= HELPERS =================
+def parse_time(text):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt)
+        except:
+            pass
+    return None
+
+def file_meta(path):
+    st = os.stat(path)
+    return {
+        "size": st.st_size,
+        "mtime": datetime.fromtimestamp(st.st_mtime),
+        "ctime": datetime.fromtimestamp(st.st_ctime),
+        "mode": stat.filemode(st.st_mode)
+    }
+
+# ================= LOG & TIMELINE SCAN =================
+def scan_logs(report):
+    report.append("\n=== TIMELINE & LOG ANALYSIS ===\n")
+
+    for base in LOG_DIRS:
+        if not os.path.exists(base):
+            continue
+
+        for root, _, files in os.walk(base):
+            for f in files:
+                if "log" not in f.lower():
+                    continue
+
+                path = os.path.join(root, f)
+                try:
+                    meta = file_meta(path)
+                    last_ts = None
+
+                    with open(path, "r", errors="ignore") as file:
+                        for line in file:
+                            m = TIMESTAMP_REGEX.search(line)
+                            if not m:
+                                continue
+
+                            ts = parse_time(m.group(1))
+                            if not ts:
+                                continue
+
+                            timeline.append((ts, path, line.strip(), meta))
+
+                            if last_ts and ts < last_ts:
+                                report.append(f"⚠️ TIME REGRESSION: {path}\n")
+
+                            last_ts = ts
+
+                    if meta["mtime"] < (last_ts or meta["mtime"]):
+                        report.append(f"⚠️ LOG MODIFIED AFTER LAST ENTRY: {path}\n")
+
+                except:
+                    continue
+
+# ================= METADATA CORRELATION =================
+def metadata_analysis(report):
+    report.append("\n=== METADATA CORRELATION ===\n")
+
+    for base in LOG_DIRS:
+        if not os.path.exists(base):
+            continue
+
+        for root, _, files in os.walk(base):
+            for f in files:
+                path = os.path.join(root, f)
+                try:
+                    st = os.stat(path)
+                    perms = stat.filemode(st.st_mode)
+
+                    if "w" in perms[-2:] or perms[3] == "x":
+                        report.append(
+                            f"⚠️ PERMISSION ANOMALY: {path} perms={perms} size={st.st_size}\n"
+                        )
+
+                    mtime = datetime.fromtimestamp(st.st_mtime)
+                    ctime = datetime.fromtimestamp(st.st_ctime)
+
+                    if mtime > now - timedelta(days=1) and ctime < now - timedelta(days=30):
+                        report.append(
+                            f"⚠️ TIMESTAMP MISMATCH: {path} mtime={mtime} ctime={ctime}\n"
+                        )
+
+                except:
+                    continue
+
+# ================= PERSISTENCE CHECK =================
+def persistence_scan(report):
+    report.append("\n=== PERSISTENCE / AUTORUN INDICATORS ===\n")
+
+    for p in PERSISTENCE_LOCATIONS:
+        path = os.path.expanduser(p)
+        if not os.path.exists(path):
+            continue
+
+        if os.path.isfile(path):
+            report.append(f"⚠️ CHECK STARTUP FILE: {path}\n")
+        else:
+            for root, _, files in os.walk(path):
+                for f in files:
+                    if f.startswith(".") or "run" in f.lower():
+                        report.append(f"⚠️ PERSISTENCE FILE: {os.path.join(root, f)}\n")
+
+# ================= MAIN =================
+def main():
+    report = []
+    report.append("FORENSIC INVESTIGATION REPORT\n")
+    report.append(f"Generated: {datetime.utcnow()} UTC\n")
+    report.append("=" * 72 + "\n")
+
+    scan_logs(report)
+    metadata_analysis(report)
+    persistence_scan(report)
+
+    timeline.sort(key=lambda x: x[0])
+    report.append("\n=== CHRONOLOGICAL TIMELINE ===\n")
+
+    for t, path, event, meta in timeline:
+        report.append(
+            f"[{t}] {path}\n"
+            f"  {event}\n"
+            f"  size={meta['size']} perms={meta['mode']} mtime={meta['mtime']}\n\n"
+        )
+
+    with open(OUTPUT_FILE, "w", encoding="utf-8", errors="ignore") as f:
+        f.writelines(report)
+
+    print("✅ Forensic investigation complete")
+    print(f"📁 Report written to:\n{OUTPUT_FILE}")
+
+if __name__ == "__main__":
+    main()
