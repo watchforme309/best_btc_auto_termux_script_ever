@@ -1,0 +1,129 @@
+import os
+import re
+
+# --- CONFIGURATION ---
+
+SCAN_DIR = "/storage/emulated/0/"
+
+OUTPUT_DIR = "/storage/emulated/0/Documents/crypto_extraction_reports"
+TOKENS_FILE = "tokens_found.txt"
+TRANSACTIONS_FILE = "transactions_found.txt"
+ADDRESSES_FILE = "addresses_found.txt"
+SUMMARY_FILE = "crypto_totals_usd.txt"
+
+TOKENS = ["BTC", "ETH", "USDT", "USDC", "BNB", "XRP", "LTC", "DOGE", "ADA"]
+
+CRYPTO_USD_RATES = {
+    "BTC": 30000.0,
+    "ETH": 2000.0,
+    "USDT": 1.0,
+    "USDC": 1.0,
+    "BNB": 300.0,
+    "XRP": 0.5,
+    "LTC": 100.0,
+    "DOGE": 0.07,
+    "ADA": 0.4,
+}
+
+TOKEN_PATTERN = re.compile(r"\b(" + "|".join(TOKENS) + r")\b", re.IGNORECASE)
+TRANSACTION_PATTERN = re.compile(r"\b(" + "|".join(TOKENS) + r")\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
+
+BTC_ADDRESS_PATTERN = re.compile(r"\b([13][a-km-zA-HJ-NP-Z1-9]{25,34})\b")
+ETH_ADDRESS_PATTERN = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
+
+def scan_files(directory):
+    files = []
+    for root, dirs, filenames in os.walk(directory, topdown=True):
+        filtered_dirs = []
+        for d in dirs:
+            path = os.path.join(root, d)
+            if os.access(path, os.R_OK):
+                filtered_dirs.append(d)
+        dirs[:] = filtered_dirs
+
+        for filename in filenames:
+            filepath = os.path.join(root, filename)
+            if os.access(filepath, os.R_OK):
+                files.append(filepath)
+    return files
+
+def extract_from_text(text):
+    tokens_found = set()
+    transactions_found = set()
+    addresses_found = set()
+    totals = {}
+
+    for match in TOKEN_PATTERN.finditer(text):
+        tokens_found.add(match.group(1).upper())
+
+    for match in TRANSACTION_PATTERN.finditer(text):
+        token = match.group(1).upper()
+        amount = float(match.group(2))
+        transactions_found.add(f"{token} {amount}")
+        totals[token] = totals.get(token, 0.0) + amount
+
+    addresses_found.update(BTC_ADDRESS_PATTERN.findall(text))
+    addresses_found.update(ETH_ADDRESS_PATTERN.findall(text))
+
+    return tokens_found, transactions_found, addresses_found, totals
+
+def save_to_file(path, data_set):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for item in sorted(data_set):
+            f.write(str(item) + "\n")
+
+def save_totals_with_usd(path, totals):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        total_usd = 0.0
+        f.write("Token | Total Amount | Estimated USD Value\n")
+        f.write("-------------------------------------------\n")
+        for token, amount in sorted(totals.items()):
+            rate = CRYPTO_USD_RATES.get(token, 0.0)
+            usd_value = amount * rate
+            total_usd += usd_value
+            f.write(f"{token} | {amount:.8f} | ${usd_value:.2f}\n")
+        f.write("-------------------------------------------\n")
+        f.write(f"Total Estimated USD Value: ${total_usd:.2f}\n")
+
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    tokens_all = set()
+    transactions_all = set()
+    addresses_all = set()
+    totals_all = {}
+
+    print(f"Scanning files under {SCAN_DIR} ...")
+    files = scan_files(SCAN_DIR)
+    print(f"Found {len(files)} files to scan.")
+
+    for idx, file_path in enumerate(files, 1):
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            tokens, transactions, addresses, totals = extract_from_text(content)
+            tokens_all.update(tokens)
+            transactions_all.update(transactions)
+            addresses_all.update(addresses)
+            for k, v in totals.items():
+                totals_all[k] = totals_all.get(k, 0.0) + v
+        except Exception:
+            continue
+        if idx % 100 == 0:
+            print(f"Scanned {idx} files...")
+
+    save_to_file(os.path.join(OUTPUT_DIR, TOKENS_FILE), tokens_all)
+    save_to_file(os.path.join(OUTPUT_DIR, TRANSACTIONS_FILE), transactions_all)
+    save_to_file(os.path.join(OUTPUT_DIR, ADDRESSES_FILE), addresses_all)
+    save_totals_with_usd(os.path.join(OUTPUT_DIR, SUMMARY_FILE), totals_all)
+
+    print("Extraction complete.")
+    print(f"Tokens found: {len(tokens_all)} saved to {TOKENS_FILE}")
+    print(f"Transactions found: {len(transactions_all)} saved to {TRANSACTIONS_FILE}")
+    print(f"Addresses found: {len(addresses_all)} saved to {ADDRESSES_FILE}")
+    print(f"Totals with USD saved to {SUMMARY_FILE}")
+
+if __name__ == "__main__":
+    main()
